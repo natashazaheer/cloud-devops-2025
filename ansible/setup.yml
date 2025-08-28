@@ -1,0 +1,123 @@
+---
+- name: Configure app server
+  hosts: app
+  become: true
+
+  vars_files:
+    - secrets.yml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Docker, Compose v1, Python and UFW
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - python3
+          - python3-pip
+          - ufw
+        state: present
+
+    - name: Ensure Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create devops user
+      user:
+        name: devops
+        groups: sudo,docker
+        append: yes
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Disable root SSH login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        create: yes
+      notify: Restart ssh
+
+    - name: Disable SSH password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        create: yes
+      notify: Restart ssh
+
+    - name: Allow SSH via UFW
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Enable UFW with default deny
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+        logging: on
+
+    - name: Create /opt/stack directory
+      file:
+        path: /opt/stack
+        state: directory
+        owner: devops
+        group: devops
+        mode: '0755'
+
+    - name: Copy nginx.conf to app server
+      copy:
+        src: files/nginx.conf
+        dest: /opt/stack/nginx.conf
+        owner: devops
+        group: devops
+        mode: '0644'
+
+    - name: Store Jenkins username in AWS SSM Parameter Store
+      aws_ssm_parameter_store:
+        name: "/jenkins/username"
+        description: "Jenkins admin username"
+        value: "{{ jenkins_user }}"
+        region: eu-north-1
+        string_type: SecureString
+        overwrite_value: always
+      delegate_to: localhost
+
+    - name: Store Jenkins password in AWS SSM Parameter Store
+      aws_ssm_parameter_store:
+        name: "/jenkins/password"
+        description: "Jenkins admin password"
+        value: "{{ jenkins_password }}"
+        region: eu-north-1
+        string_type: SecureString
+        overwrite_value: always
+      delegate_to: localhost
+
+    - name: Copy docker-compose.yml to app server
+      template:
+        src: templates/docker-compose.yml.j2
+        dest: /opt/stack/docker-compose.yml
+        owner: devops
+        group: devops
+        mode: '0644'
+
+    - name: Bring up docker-compose stack
+      command: docker-compose -f /opt/stack/docker-compose.yml up -d
+      args:
+        chdir: /opt/stack
+      async: 600
+      poll: 10
+
+  handlers:
+    - name: Restart ssh
+      service:
+        name: ssh
+        state: restarted
